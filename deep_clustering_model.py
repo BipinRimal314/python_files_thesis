@@ -1,185 +1,145 @@
 """
-Model 3: Deep Clustering (Lightweight)
-[--- UPDATED VERSION ---]
-- Loads 'static_scaler.pkl'
-- Loads 'engineered_static_features.csv'
-- Uses 'stratify=y' on all splits
+Deep Clustering for Insider Threat Detection
+Combines Autoencoder reconstruction loss with clustering distance.
 """
+
+import os
+# Prevent TensorFlow from using Metal GPU which can cause hangs
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU to avoid GPU issues
 
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.cluster import MiniBatchKMeans
-from typing import Tuple, Dict
+
+import tensorflow as tf
+# Disable GPU for stability on Mac
+tf.config.set_visible_devices([], 'GPU')
+
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import joblib # Standardized on joblib
 import config
 import utils
 
 logger = utils.logger
 
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-    from tensorflow.keras import layers, Model
-    TF_AVAILABLE = True
-except ImportError:
-    TF_AVAILABLE = False
-    logger.warning("TensorFlow not available, using statistical fallback for Deep Clustering")
+def load_data():
+    """Load daily features"""
+    file_path = config.DAILY_FEATURES_FILE
+    if not file_path.exists():
+        logger.error(f"Daily features not found at {file_path}")
+        return None
+    return pd.read_parquet(file_path)
 
-class DeepClusteringLite:
+def load_static_scaler():
+    """Load the fitted scaler for static features using joblib"""
+    scaler_path = config.MODEL_PATHS['static_scaler']
     
-    def __init__(self, n_clusters: int, input_dim: int, **kwargs):
-        self.n_clusters = n_clusters
-        self.input_dim = input_dim
-        self.params = config.DEEP_CLUSTERING.copy()
-        self.params.update(kwargs)
-        self.is_trained = False
-        self.threshold = None
-        self.kmeans = MiniBatchKMeans(n_clusters=self.n_clusters, 
-                                      random_state=config.RANDOM_SEED,
-                                      batch_size=self.params['batch_size'],
-                                      n_init=10)
-        # --- NEW: Load the correct scaler ---
+    if scaler_path.exists():
         try:
-            self.scaler = utils.load_model(config.MODELS_DIR / 'static_scaler.pkl')
-        except FileNotFoundError:
-            logger.error("static_scaler.pkl not found! Run feature_engineering.py first.")
-            self.scaler = None
-
-        logger.info(f"Initialized Lightweight Deep Clustering (n_clusters={n_clusters})")
-    
-    def train(self, X_train: np.ndarray):
-        logger.info("Training lightweight deep clustering model (K-Means)...")
-        self.kmeans.fit(X_train)
-        self.is_trained = True
-        logger.info("Lightweight deep clustering training completed")
-        
-    def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        if not self.is_trained:
-            raise ValueError("Model must be trained before predicting")
-        
-        distances = self.kmeans.transform(X)
-        anomaly_scores = np.min(distances, axis=1)
-        anomaly_scores = utils.normalize_scores(anomaly_scores)
-        
-        if self.threshold is not None:
-            predictions = (anomaly_scores > self.threshold).astype(int)
-        else:
-            predictions = (anomaly_scores > 0.95).astype(int)
-        
-        return predictions, anomaly_scores
-    
-    def calibrate_threshold(self, X_val: np.ndarray, y_val: np.ndarray, 
-                           target_fpr: float = 0.05) -> float:
-        logger.info(f"Calibrating threshold for target FPR={target_fpr}")
-        _, anomaly_scores = self.predict(X_val)
-        
-        normal_scores = anomaly_scores[y_val == 0]
-        if len(normal_scores) == 0:
-            logger.warning("No normal samples in validation set for calibration. Using default 0.95")
-            self.threshold = 0.95
-            return self.threshold
-            
-        normal_scores_sorted = np.sort(normal_scores)
-        threshold_idx = int(len(normal_scores_sorted) * (1 - target_fpr))
-        self.threshold = normal_scores_sorted[threshold_idx] if threshold_idx < len(normal_scores_sorted) else 0.95
-        
-        logger.info(f"Calibrated threshold: {self.threshold:.4f}")
-        return self.threshold
-    
-    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, float]:
-        logger.info("Evaluating lightweight deep clustering model...")
-        predictions, scores = self.predict(X_test)
-        metrics = utils.calculate_metrics(y_test, predictions, scores)
-        utils.print_metrics(metrics, "Deep Clustering (Lightweight)")
-        return metrics
-    
-    def save_model(self, filepath = None):
-        if filepath is None:
-            filepath = config.MODEL_PATHS['deep_clustering']
-        utils.save_model(self.kmeans, filepath)
-        logger.info(f"Lightweight deep clustering model saved to {filepath}")
-    
-    def load_model(self, filepath = None):
-        if filepath is None:
-            filepath = config.MODEL_PATHS['deep_clustering']
-        self.kmeans = utils.load_model(filepath)
-        self.is_trained = True
-        logger.info(f"Lightweight deep clustering model loaded from {filepath}")
-
+            scaler = joblib.load(scaler_path)
+            return scaler
+        except Exception as e:
+            logger.warning(f"Could not load static scaler ({e}). Will fit new one.")
+            return None
+    return None
 
 def main():
     logger.info(utils.generate_report_header("LIGHTWEIGHT DEEP CLUSTERING TRAINING"))
     
-    try:
-        df = utils.load_dataframe('engineered_static_features.csv')
-    except:
-        logger.error("engineered_static_features.csv not found. Run feature_engineering.py first.")
+    # 1. Load Data
+    df = load_data()
+    if df is None:
         return None, None
+        
+    # Drop non-numeric
+    exclude_cols = ['user', 'day', 'is_anomaly', 'is_insider']
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
+    X = df[feature_cols].values
     
-    user_col = 'user_pseudo' if 'user_pseudo' in df.columns else 'user'
+    # 2. Scaling
+    # We try to load the global scaler, but if dimensions mismatch (daily vs static), we fit a new one.
+    scaler = load_static_scaler()
     
-    # --- FIX: Ensure feature names are loaded from the scaler ---
-    detector = DeepClusteringLite(n_clusters=config.DEEP_CLUSTERING['n_clusters'], input_dim=0)
-    if detector.scaler is None: return None, None
+    try:
+        X_scaled = scaler.transform(X) if scaler else StandardScaler().fit_transform(X)
+    except:
+        # Fallback if scaler expects different features
+        X_scaled = StandardScaler().fit_transform(X)
+        
+    # 3. Clustering (Simplified Deep Clustering)
+    input_dim = X_scaled.shape[1]
     
-    feature_names = detector.scaler.get_feature_names_out()
-    feature_names = [f for f in feature_names if f in df.columns]
+    from tensorflow.keras.layers import Input, Dense
+    from tensorflow.keras.models import Model
     
-    y = df['is_insider']
-    X = df[feature_names] # Use only scaled features
+    # Encoder
+    input_layer = Input(shape=(input_dim,))
+    encoded = Dense(64, activation='relu')(input_layer)
+    encoded = Dense(32, activation='relu')(encoded) # Latent space
     
-    n_features = X.shape[1]
-    detector.input_dim = n_features
-    logger.info(f"Dataset: {len(X)} samples, {n_features} features")
-
-    # Split data using stratify
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y, 
-        test_size=(1 - config.TRAIN_RATIO), 
-        random_state=config.RANDOM_SEED, 
-        stratify=y if y.sum() > 1 else None
-    )
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp, 
-        test_size=(config.TEST_RATIO / (config.VAL_RATIO + config.TEST_RATIO)), 
+    # Decoder
+    decoded = Dense(64, activation='relu')(encoded)
+    decoded = Dense(input_dim, activation='linear')(decoded)
+    
+    ae = Model(input_layer, decoded)
+    ae.compile(optimizer='adam', loss='mse')
+    
+    # Train Autoencoder
+    ae.fit(X_scaled, X_scaled, 
+           epochs=10, 
+           batch_size=256,
+           shuffle=True,
+           verbose=0)
+    
+    # Extract Latent Features
+    encoder = Model(input_layer, encoded)
+    X_latent = encoder.predict(X_scaled)
+    
+    # 3b. KMeans on Latent Space
+    kmeans = KMeans(
+        n_clusters=config.DEEP_CLUSTERING['n_clusters'],
         random_state=config.RANDOM_SEED,
-        stratify=y_temp if y_temp.sum() > 1 else None
+        n_init=10
     )
+    clusters = kmeans.fit_predict(X_latent)
     
-    logger.info(f"Data split: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}")
-    logger.info(f"Insider labels split: Train={y_train.sum()}, Val={y_val.sum()}, Test={y_test.sum()}")
+    # 4. Anomaly Detection Logic
+    centers = kmeans.cluster_centers_
+    distances = np.linalg.norm(X_latent - centers[clusters], axis=1)
     
-    # Train model
-    import time
-    start_time = time.time()
-    detector.train(X_train.values) # K-Means prefers numpy arrays
-    training_time = time.time() - start_time
-    logger.info(f"Training completed in {training_time:.2f} seconds")
+    X_recon = ae.predict(X_scaled)
+    recon_error = np.mean(np.square(X_scaled - X_recon), axis=1)
     
-    # Calibrate threshold
-    if y_val.sum() > 0 or len(y_val) > 0:
-        detector.calibrate_threshold(X_val.values, y_val.values, target_fpr=0.05)
+    # Combine (Normalize both first)
+    dist_norm = (distances - distances.min()) / (distances.max() - distances.min())
+    recon_norm = (recon_error - recon_error.min()) / (recon_error.max() - recon_error.min())
+    
+    final_scores = 0.5 * dist_norm + 0.5 * recon_norm
+    
+    # Threshold
+    threshold = np.percentile(final_scores, 95)
+    predictions = (final_scores > threshold).astype(int)
+    
+    # 5. Save Results
+    results_df = df[['user', 'day']].copy()
+    if 'is_anomaly' in df.columns:
+        results_df['true_label'] = df['is_anomaly']
     else:
-        logger.warning("No validation samples. Using default threshold.")
-        detector.threshold = 0.95
+        results_df['true_label'] = 0
+        
+    results_df['prediction'] = predictions
+    results_df['anomaly_score'] = final_scores
     
-    # Evaluate on test set
-    metrics = detector.evaluate(X_test.values, y_test.values)
+    output_path = config.RESULTS_DIR / 'deep_clustering_predictions.csv'
+    results_df.to_csv(output_path, index=False)
+    logger.info(f"Predictions saved to {output_path}")
     
-    detector.save_model()
+    # Metrics
+    metrics = utils.calculate_metrics(results_df['true_label'], predictions, final_scores)
+    utils.print_metrics(metrics, "Deep Clustering")
     
-    metrics_df = pd.DataFrame([metrics])
-    metrics_df['model'] = 'Deep Clustering (Lightweight)'
-    metrics_df.to_csv(config.RESULTS_DIR / 'deep_clustering_metrics.csv', index=False)
-    
-    predictions, scores = detector.predict(X_test.values)
-    results_df = pd.DataFrame({'true_label': y_test, 'prediction': predictions, 'anomaly_score': scores})
-    results_df.to_csv(config.RESULTS_DIR / 'deep_clustering_predictions.csv', index=False)
-    
-    logger.info("Lightweight deep clustering training and evaluation completed!")
-    logger.info(f"Total time: {training_time:.2f} seconds")
-    
-    return detector, metrics
+    return kmeans, metrics
 
 if __name__ == "__main__":
     main()

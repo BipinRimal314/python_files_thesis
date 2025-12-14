@@ -1,9 +1,6 @@
 """
 Configuration file for Insider Threat Detection System
-[--- UPDATED VERSION ---]
-- Disables sampling and filtering to ensure insider (ONS0995) is processed
-- Adds paths for psychometric and LDAP data
-- Sets LSTM Autoencoder save path to .keras to fix Keras 3.x error
+FAST TESTING MODE - Optimized for quick pipeline verification
 """
 
 import os
@@ -14,65 +11,78 @@ from pathlib import Path
 # ============================================================================
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
-RAW_DATA_DIR = DATA_DIR / "raw"
+RAW_DATA_DIR = DATA_DIR / "all_data" 
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 MODELS_DIR = BASE_DIR / "models"
 RESULTS_DIR = BASE_DIR / "results"
 LOGS_DIR = BASE_DIR / "logs"
+LEGACY_DIR = BASE_DIR / "legacy"
+PLOTS_DIR = RESULTS_DIR / "plots"
 
 # Create directories if they don't exist
-for directory in [DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, MODELS_DIR, RESULTS_DIR, LOGS_DIR]:
+for directory in [DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, MODELS_DIR, RESULTS_DIR, LOGS_DIR, LEGACY_DIR, PLOTS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
+
+# ============================================================================
+# FILE PATHS (INTERMEDIATE DATA)
+# ============================================================================
+PROCESSED_DATA_FILE = PROCESSED_DATA_DIR / "processed_unified_logs.csv"
+DAILY_FEATURES_FILE = PROCESSED_DATA_DIR / "daily_features.parquet"
+SEQUENCE_DATA_FILE = PROCESSED_DATA_DIR / "sequence_features.parquet" 
+SEQUENCE_LABELS_FILE = PROCESSED_DATA_DIR / "sequence_labels.npy"
 
 # ============================================================================
 # DATA SETTINGS
 # ============================================================================
-# CMU-CERT Dataset files
-CERT_FILES = {
+
+# Datasets to process (Use only 'r1' for speed)
+DATASET_SUBSET = ['r1', 'r2', 'r3.1', 'r3.2', 'r4.1'] 
+
+LOG_FILENAMES = {
     'logon': 'logon.csv',
     'device': 'device.csv',
-    # 'file': 'file.csv',  # Removed as it's not in your /raw folder
+    'file': 'file.csv',
     'email': 'email.csv',
-    'http': 'http.csv',
-    'psychometric': 'psychometric.csv', # Added
-    'ldap': 'LDAP/' # Added
+    'http': 'http.csv'
 }
 
-# Data split ratios
+STATIC_FILENAMES = {
+    'psychometric': 'psychometric.csv'
+}
+
+LDAP_PATH = Path("LDAP") 
+
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
-
-# Random seed for reproducibility
 RANDOM_SEED = 42
-
-# --- FIX: SAMPLING MUST BE DISABLED TO CAPTURE THE INSIDER ---
-MAX_ROWS = 100000
-USE_SAMPLING = False # Set to False to process the entire dataset
 
 # ============================================================================
 # PREPROCESSING SETTINGS
 # ============================================================================
-# De-identification settings
-PSEUDONYMIZE_USERS = True
-PSEUDONYMIZE_HOSTS = True
+PRIVACY = {
+    'min_user_activity_threshold': 0,
+    'salt': 'salty_salty_salt' 
+}
 
-# Feature engineering
 TIME_WINDOWS = {
     'daily': '1D'
 }
 
-# Sequence settings for LSTM - REDUCED
+# Sequence settings for LSTM
 SEQUENCE_LENGTH = 15
-SEQUENCE_STRIDE = 10
+SEQUENCE_STRIDE = 10 
+
+# Set to None to use full dataset (was 5000 for debugging)
+MAX_SEQUENCE_SAMPLES = None
 
 # ============================================================================
-# ISOLATION FOREST PARAMETERS - OPTIMIZED
+# ISOLATION FOREST PARAMETERS (Fast Mode)
 # ============================================================================
 ISOLATION_FOREST = {
-    'n_estimators': 50,
-    'max_samples': 256,
-    'contamination': 0.01,
+    'n_estimators': 50, # Low number of trees
+    'max_samples': 256, 
+    'contamination': 'auto', 
     'max_features': 1.0,
     'bootstrap': False,
     'n_jobs': -1,
@@ -81,7 +91,7 @@ ISOLATION_FOREST = {
 }
 
 # ============================================================================
-# DEEP CLUSTERING PARAMETERS - LIGHTWEIGHT
+# DEEP CLUSTERING PARAMETERS (Fast Mode)
 # ============================================================================
 DEEP_CLUSTERING = {
     'n_clusters': 5,
@@ -91,21 +101,21 @@ DEEP_CLUSTERING = {
     'dropout_rate': 0.2,
     'learning_rate': 0.001,
     'batch_size': 256,
-    'epochs': 30,
+    'epochs': 10,
     'lambda_param': 0.1,
-    'patience': 5,
+    'patience': 3,
     'verbose': 1
 }
 
 # ============================================================================
-# LSTM AUTOENCODER PARAMETERS - LIGHTWEIGHT
+# LSTM AUTOENCODER PARAMETERS (Fast Mode)
 # ============================================================================
 LSTM_AUTOENCODER = {
     'encoding_dim': 16,
     'lstm_units': [32, 16],
     'dropout_rate': 0.2,
     'learning_rate': 0.001,
-    'batch_size': 128,
+    'batch_size': 256,
     'epochs': 20,
     'patience': 5,
     'verbose': 1,
@@ -113,25 +123,11 @@ LSTM_AUTOENCODER = {
 }
 
 # ============================================================================
-# ENSEMBLE SETTINGS
-# ============================================================================
-ENSEMBLE = {
-    'weights': {
-        'isolation_forest': 0.4,
-        'deep_clustering': 0.3,
-        'lstm_autoencoder': 0.3
-    },
-    'voting_method': 'weighted',
-    'final_threshold': 0.7
-}
-
-# ============================================================================
 # EVALUATION SETTINGS
 # ============================================================================
 EVALUATION = {
     'metrics': ['accuracy', 'precision', 'recall', 'f1', 'auc_roc'],
-    'cross_validation_folds': 3,
-    'threshold_steps': 50
+    'threshold_steps': 100 
 }
 
 # ============================================================================
@@ -146,6 +142,30 @@ VISUALIZATION = {
 }
 
 # ============================================================================
+# ENSEMBLE PARAMETERS
+# ============================================================================
+ENSEMBLE = {
+    'weights': {
+        'isolation_forest': 0.3,
+        'lstm_autoencoder': 0.4,
+        'deep_clustering': 0.3
+    },
+    'final_threshold': 0.7 
+}
+
+# ============================================================================
+# ALERT SETTINGS
+# ============================================================================
+ALERTS = {
+    'severity_levels': {
+        'low': (0.7, 0.8),
+        'medium': (0.8, 0.9),
+        'high': (0.9, 0.98),
+        'critical': (0.98, 1.0)
+    }
+}
+
+# ============================================================================
 # LOGGING SETTINGS
 # ============================================================================
 LOGGING = {
@@ -156,55 +176,16 @@ LOGGING = {
 }
 
 # ============================================================================
-# ALERT SETTINGS
-# ============================================================================
-ALERTS = {
-    'severity_levels': {
-        'low': (0.5, 0.7),
-        'medium': (0.7, 0.85),
-        'high': (0.85, 0.95),
-        'critical': (0.95, 1.0)
-    },
-    'max_alerts_per_day': 100,
-    'explainability': True
-}
-
-# ============================================================================
-# PRIVACY SETTINGS
-# ============================================================================
-PRIVACY = {
-    'anonymization_method': 'hash',
-    'salt': 'insider_threat_detection_2025',
-    'keep_temporal_patterns': True,
-    'aggregate_low_frequency_users': True,
-    # --- FIX: FILTERING MUST BE DISABLED TO KEEP THE INSIDER ---
-    'min_user_activity_threshold': 0 # Set to 0 to disable filtering
-}
-
-# ============================================================================
-# FEATURE COLUMNS
-# ============================================================================
-FEATURE_COLUMNS = {
-    'temporal': [],
-    'behavioral': [],
-    'statistical': [],
-    'sequential': []
-}
-
-# ============================================================================
 # MODEL SAVE PATHS
 # ============================================================================
 MODEL_PATHS = {
-    'isolation_forest': MODELS_DIR / 'isolation_forest.pkl',
-    'deep_clustering': MODELS_DIR / 'deep_clustering.pkl',
-    # --- FIX: Keras models must be .keras or .h5 ---
-    'lstm_autoencoder': MODELS_DIR / 'lstm_autoencoder.keras',
-    
-    # --- NEW: Separate scalers for static and daily data ---
-    'static_scaler': MODELS_DIR / 'static_feature_scaler.pkl',
-    'daily_scaler': MODELS_DIR / 'daily_feature_scaler.pkl',
-    
-    'label_encoders': MODELS_DIR / 'label_encoders.pkl'
+    'isolation_forest': MODELS_DIR / 'isolation_forest_model.pkl',
+    'isolation_forest_v2': MODELS_DIR / 'isolation_forest_model_v2.pkl',
+    'lstm_autoencoder': MODELS_DIR / 'lstm_autoencoder_model.keras',
+    'deep_clustering': MODELS_DIR / 'deep_clustering_model.pkl',
+    'static_scaler': MODELS_DIR / 'static_scaler.pkl',
+    'static_scaler_v2': MODELS_DIR / 'static_scaler_v2.pkl',
+    'daily_scaler': MODELS_DIR / 'daily_scaler.pkl'
 }
 
 # ============================================================================
@@ -212,43 +193,24 @@ MODEL_PATHS = {
 # ============================================================================
 RESULT_PATHS = {
     'evaluation_metrics': RESULTS_DIR / 'evaluation_metrics.csv',
+    'optimal_evaluation_report': RESULTS_DIR / 'optimal_evaluation_report.csv',
     'confusion_matrices': RESULTS_DIR / 'confusion_matrices',
     'roc_curves': RESULTS_DIR / 'roc_curves',
-    'anomaly_scores': RESULTS_DIR / 'anomaly_scores.csv',
-    'alerts': RESULTS_DIR / 'generated_alerts.csv',
-    'visualizations': RESULTS_DIR / 'visualizations'
+    'visualizations': RESULTS_DIR / 'visualizations',
+    'alerts': RESULTS_DIR / 'alerts.csv'
 }
 
-# Create result subdirectories
 for key, path in RESULT_PATHS.items():
     if key in ['confusion_matrices', 'roc_curves', 'visualizations']:
         path.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
-# PERFORMANCE OPTIMIZATIONS FOR MACBOOK
+# PERFORMANCE OPTIMIZATIONS
 # ============================================================================
 PERFORMANCE = {
-    'chunk_size': 500000, # Increased chunk size
-    'use_float32': True,
-    'use_multiprocessing': True,
-    'n_jobs': -1,
-    'tf_memory_growth': True,
-    'mixed_precision': False,
-    'cache_preprocessed': True,
-    'incremental_loading': True
+    'streaming_chunk_size': 50000, 
+    'force_rerun': False
 }
 
-# ============================================================================
-# MACBOOK M4 PRO SPECIFIC SETTINGS
-# ============================================================================
-MACBOOK_OPTIMIZATIONS = {
-    'use_mps': True,
-    'max_memory_mb': 8000,
-    'enable_batch_processing': True,
-    'max_features': 50,
-    'use_stratified_sampling': True
-}
-
-print(f"Configuration loaded (LIGHTWEIGHT MODE for MacBook M4 Pro)")
-print(f"Base directory: {BASE_DIR}")
-print(f"Performance optimizations enabled")
+print(f"Configuration loaded. MAX_SEQUENCE_SAMPLES: {MAX_SEQUENCE_SAMPLES or 'Full dataset'}")
+print(f"Raw data source: {RAW_DATA_DIR}")

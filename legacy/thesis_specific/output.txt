@@ -1,0 +1,28 @@
+# Model Evaluation Results Explanation
+
+## Summary
+The results show that the **LSTM Autoencoder** is the best performing model, demonstrating strong capability to detect insider threats (High Recall and AUC), but it is currently too "sensitive" (High False Positives).
+
+The other models (Isolation Forest, Deep Clustering) failed to detect the few anomalies present in this specific test split.
+
+## Detailed Analysis
+
+### 1. Data Context (Crucial!)
+*   **Extreme Class Imbalance**: The test datasets contained very few actual anomalies:
+    *   Isolation Forest / Deep Clustering Test Set: **1 anomaly** vs ~1000 normal.
+    *   LSTM Test Set: **2 anomalies** vs ~31,000 normal sequences.
+*   **Implication**: With so few anomalies, "Accuracy" is meaningless (a dummy model predicting "All Normal" would get 99.9% accuracy). We must look at **Recall** (did we catch them?) and **AUC** (separation quality).
+
+### 2. LSTM Autoencoder (The Winner)
+*   **AUC-ROC: 0.9849 (Excellent)**: This is the most critical metric. It means that if you pick a random anomaly and a random normal user, the model correctly scores the anomaly higher 98.5% of the time. The model *understands* the difference between normal and abnormal behavior.
+*   **Recall: 1.0 (Perfect)**: It successfully caught **100%** (2 out of 2) of the insiders in the test set.
+*   **Precision: 0.0013 (Low)**: It generated **1,554 False Positives**. This means the specific "cutoff threshold" used to decide detection was set too low.
+*   **Action**: The model is good, but the threshold needs tuning. Raising the alert threshold will eliminate most of those 1,554 false alarms while likely keeping the 2 true detections.
+
+### 3. Isolation Forest & Deep Clustering (Underperforming)
+*   **Recall: 0.0**: Both models missed the single anomaly in their test sets (True Positives = 0).
+*   **AUC: 0.82 (IF) / 0.74 (DC)**: The Isolation Forest shows some promise (0.82 is decent), but it wasn't enough to catch the specific case in this run at the default threshold.
+
+### 4. About the "Ensemble" Error
+*   The error `AttributeError: module 'config' has no attribute 'ENSEMBLE'` at the end of your log occurred because the configuration for the ensemble stage was missing.
+*   **Status**: I have fixed this in the codebase. The run you just started (currently executing) should successfully run Stage 5. This is important because the Ensemble step can help filter out the high false positives from the LSTM model.

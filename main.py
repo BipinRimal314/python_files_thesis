@@ -3,15 +3,26 @@ Main Execution Pipeline for Insider Threat Detection System
 Orchestrates the complete workflow from data preprocessing to final reporting
 """
 
+# CRITICAL: Must be set BEFORE any TensorFlow imports (including via other modules)
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
 import sys
 import argparse
 from pathlib import Path
+
+# Disable GPU before TensorFlow loads
+import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU')
+
 import config
 import utils
 
-# Import all modules
-import data_preprocessing
-import feature_engineering
+# Import modules
+import data_preprocessing_polars as data_preprocessing
+import feature_engineering_polars as feature_engineering
 import isolation_forest_model
 import lstm_autoencoder_model
 import deep_clustering_model
@@ -28,8 +39,6 @@ class InsiderThreatDetectionPipeline:
     
     def __init__(self):
         """Initialize the pipeline"""
-        self.preprocessor = None
-        self.feature_engineer = None
         self.models = {}
         self.results = {}
         
@@ -37,61 +46,90 @@ class InsiderThreatDetectionPipeline:
         logger.info("INSIDER THREAT DETECTION SYSTEM")
         logger.info("Unsupervised Behavioral Profiling Using Time-Series and Anomaly Detection")
         logger.info("="*80)
+        
+        # Ensure base directories exist
+        self._ensure_directories()
+
+    def _ensure_directories(self):
+        """Ensure all necessary directories from config exist"""
+        dirs = [
+            config.DATA_DIR, 
+            config.PROCESSED_DATA_DIR, 
+            config.MODELS_DIR, 
+            config.RESULTS_DIR,
+            config.PLOTS_DIR
+        ]
+        for d in dirs:
+            Path(d).mkdir(parents=True, exist_ok=True)
+
+    def _check_file_exists(self, filepath, stage_name):
+        """Helper to check if a required file exists before running a stage"""
+        if not os.path.exists(filepath):
+            logger.error(f"Missing required file for {stage_name}: {filepath}")
+            logger.error(f"Please run the previous stages first to generate this file.")
+            return False
+        return True
     
     def stage_1_data_preprocessing(self, insider_list=None):
         """
         Stage 1: Data Preprocessing
-        Load, clean, and prepare raw CMU-CERT dataset
-        
-        Args:
-            insider_list: Optional list of known insider users
         """
         logger.info(utils.generate_report_header("STAGE 1: DATA PREPROCESSING"))
         
-        self.preprocessor = data_preprocessing.DataPreprocessor()
-        processed_data = self.preprocessor.run_full_pipeline(insider_list=insider_list)
-        
-        logger.info(f"✓ Stage 1 completed: {len(processed_data)} records processed")
-        
-        return processed_data
+        try:
+            # Initialize Polars preprocessor
+            preprocessor = data_preprocessing.DataPreprocessorPolars()
+            
+            # Run pipeline
+            processed_data = preprocessor.run_pipeline()
+            
+            logger.info(f"✓ Stage 1 completed successfully.")
+            return processed_data
+            
+        except Exception as e:
+            logger.error(f"✗ Stage 1 failed: {e}")
+            raise e
     
-    def stage_2_feature_engineering(self, df=None):
+    def stage_2_feature_engineering(self):
         """
         Stage 2: Feature Engineering
-        Create temporal and behavioral features
-        
-        Args:
-            df: Preprocessed dataframe (loads from disk if None)
         """
         logger.info(utils.generate_report_header("STAGE 2: FEATURE ENGINEERING"))
         
-        if df is None:
-            try:
-                df = utils.load_dataframe('processed_unified_logs.csv')
-            except:
-                logger.error("No preprocessed data found. Run stage 1 first.")
-                return None
-        
-        self.feature_engineer = feature_engineering.FeatureEngineer()
-        
-        # Create aggregated features
-        features_df = self.feature_engineer.run_full_pipeline(df, time_window='1D')
-        
-        # Create sequences for LSTM
-        sequences, labels, user_ids = self.feature_engineer.create_sequence_features(df)
-        
-        logger.info(f"✓ Stage 2 completed: {len(features_df)} feature vectors, {len(sequences)} sequences")
-        
-        return features_df, sequences, labels
+        # Check if Stage 1 output exists
+        if not self._check_file_exists(config.PROCESSED_DATA_FILE, "Stage 2"):
+            logger.error(f"Expected input file: {config.PROCESSED_DATA_FILE}")
+            return
+
+        try:
+            feature_engineer = feature_engineering.FeatureEngineerPolars()
+            
+            # Run full pipeline
+            feature_engineer.run_pipeline()
+            
+            logger.info(f"✓ Stage 2 completed: Feature files generated.")
+            
+        except Exception as e:
+            logger.error(f"✗ Stage 2 failed: {e}")
+            raise e
     
     def stage_3_model_training(self):
         """
         Stage 3: Model Training
-        Train all three models: Isolation Forest, LSTM Autoencoder, Deep Clustering
         """
         logger.info(utils.generate_report_header("STAGE 3: MODEL TRAINING"))
         
-        # Train Isolation Forest
+        # Verify feature files exist
+        required_files = [
+            (config.DAILY_FEATURES_FILE, "Isolation Forest"),
+            (config.SEQUENCE_DATA_FILE, "Deep Learning Models") 
+        ]
+        
+        for file_path, model_name in required_files:
+            if not self._check_file_exists(file_path, model_name):
+                return
+
+        # 1. Train Isolation Forest
         logger.info("\n>>> Training Isolation Forest...")
         try:
             if_detector, if_metrics = isolation_forest_model.main()
@@ -100,8 +138,10 @@ class InsiderThreatDetectionPipeline:
             logger.info("✓ Isolation Forest training completed")
         except Exception as e:
             logger.error(f"✗ Isolation Forest training failed: {e}")
+            import traceback
+            traceback.print_exc()
         
-        # Train LSTM Autoencoder
+        # 2. Train LSTM Autoencoder
         logger.info("\n>>> Training LSTM Autoencoder...")
         try:
             lstm_model, lstm_metrics = lstm_autoencoder_model.main()
@@ -111,7 +151,7 @@ class InsiderThreatDetectionPipeline:
         except Exception as e:
             logger.error(f"✗ LSTM Autoencoder training failed: {e}")
         
-        # Train Deep Clustering
+        # 3. Train Deep Clustering
         logger.info("\n>>> Training Deep Clustering...")
         try:
             dc_model, dc_metrics = deep_clustering_model.main()
@@ -126,61 +166,63 @@ class InsiderThreatDetectionPipeline:
     def stage_4_model_evaluation(self):
         """
         Stage 4: Model Evaluation
-        Compare and evaluate all models
         """
         logger.info(utils.generate_report_header("STAGE 4: MODEL EVALUATION"))
         
-        evaluator = model_evaluation.ModelEvaluator()
-        evaluator.run_full_evaluation()
-        
-        logger.info("✓ Stage 4 completed: Comprehensive evaluation report generated")
+        try:
+            evaluator = model_evaluation.ModelEvaluator()
+            evaluator.run_full_evaluation()
+            logger.info("✓ Stage 4 completed: Comprehensive evaluation report generated")
+        except Exception as e:
+            logger.error(f"✗ Stage 4 failed: {e}")
     
     def stage_5_ensemble_integration(self):
         """
         Stage 5: Ensemble Integration
-        Combine models and generate final alerts
         """
         logger.info(utils.generate_report_header("STAGE 5: ENSEMBLE INTEGRATION"))
         
-        # Test all ensemble methods
-        methods = ['weighted', 'majority', 'cascade']
-        best_method = None
-        best_f1 = 0
-        
-        for method in methods:
-            try:
+        try:
+            methods = ['weighted', 'majority', 'cascade']
+            best_method = None
+            best_f1 = 0
+            
+            for method in methods:
+                logger.info(f"Testing ensemble method: {method}")
                 ensemble = ensemble_system.EnsembleDetector(method=method)
                 results = ensemble.run_ensemble_pipeline()
                 
-                if results['metrics']['f1_score'] > best_f1:
-                    best_f1 = results['metrics']['f1_score']
-                    best_method = method
-            except Exception as e:
-                logger.error(f"Error with {method} ensemble: {e}")
-        
-        logger.info(f"\n✓ Stage 5 completed: Best ensemble method = {best_method} (F1={best_f1:.4f})")
-        
-        return best_method
-    
+                if results and 'metrics' in results and results['metrics']:
+                    current_f1 = results['metrics'].get('f1_score', 0)
+                    if current_f1 > best_f1:
+                        best_f1 = current_f1
+                        best_method = method
+                else:
+                    best_method = "unsupervised_ensemble"
+            
+            logger.info(f"\n✓ Stage 5 completed. Best performing method: {best_method}")
+            return best_method
+        except KeyError as e:
+             logger.error(f"✗ Stage 5 failed (KeyError): {e} - likely missing columns due to pipeline issues.")
+        except Exception as e:
+            logger.error(f"✗ Stage 5 failed: {e}")
+
     def stage_6_visualization(self):
         """
         Stage 6: Results Visualization
-        Generate comprehensive visualizations and dashboards
         """
         logger.info(utils.generate_report_header("STAGE 6: VISUALIZATION"))
         
-        dashboard = visualization.VisualizationDashboard()
-        dashboard.generate_all_visualizations()
-        
-        logger.info("✓ Stage 6 completed: All visualizations generated")
-    
+        try:
+            dashboard = visualization.VisualizationDashboard()
+            dashboard.generate_all_visualizations()
+            logger.info("✓ Stage 6 completed: All visualizations generated")
+        except Exception as e:
+            logger.error(f"✗ Stage 6 failed: {e}")
+
     def run_full_pipeline(self, insider_list=None, skip_stages=None):
         """
         Run the complete pipeline from start to finish
-        
-        Args:
-            insider_list: Optional list of known insider users for labeling
-            skip_stages: List of stage numbers to skip (e.g., [1, 2] to skip preprocessing and feature engineering)
         """
         if skip_stages is None:
             skip_stages = []
@@ -192,14 +234,13 @@ class InsiderThreatDetectionPipeline:
         try:
             # Stage 1: Data Preprocessing
             if 1 not in skip_stages:
-                processed_data = self.stage_1_data_preprocessing(insider_list)
+                self.stage_1_data_preprocessing(insider_list)
             else:
                 logger.info("Skipping Stage 1: Data Preprocessing")
-                processed_data = None
             
             # Stage 2: Feature Engineering
             if 2 not in skip_stages:
-                features_df, sequences, labels = self.stage_2_feature_engineering(processed_data)
+                self.stage_2_feature_engineering()
             else:
                 logger.info("Skipping Stage 2: Feature Engineering")
             
@@ -217,7 +258,7 @@ class InsiderThreatDetectionPipeline:
             
             # Stage 5: Ensemble Integration
             if 5 not in skip_stages:
-                best_ensemble = self.stage_5_ensemble_integration()
+                self.stage_5_ensemble_integration()
             else:
                 logger.info("Skipping Stage 5: Ensemble Integration")
             
@@ -231,9 +272,11 @@ class InsiderThreatDetectionPipeline:
             self.print_final_summary()
             
             logger.info("\n" + "="*80)
-            logger.info("✓ PIPELINE EXECUTION COMPLETED SUCCESSFULLY")
+            logger.info("✓ PIPELINE EXECUTION COMPLETED")
             logger.info("="*80 + "\n")
             
+        except KeyboardInterrupt:
+            logger.warning("\nPipeline execution interrupted by user.")
         except Exception as e:
             logger.error(f"\n✗ PIPELINE EXECUTION FAILED: {e}")
             import traceback
@@ -246,115 +289,83 @@ class InsiderThreatDetectionPipeline:
         logger.info("="*80)
         
         # Model performance
-        logger.info("\nModel Performance:")
-        for model_name, metrics in self.results.items():
-            logger.info(f"\n{model_name.replace('_', ' ').title()}:")
-            logger.info(f"  Accuracy:  {metrics.get('accuracy', 0):.4f}")
-            logger.info(f"  Precision: {metrics.get('precision', 0):.4f}")
-            logger.info(f"  Recall:    {metrics.get('recall', 0):.4f}")
-            logger.info(f"  F1-Score:  {metrics.get('f1_score', 0):.4f}")
-            if 'auc_roc' in metrics:
-                logger.info(f"  AUC-ROC:   {metrics['auc_roc']:.4f}")
+        if self.results:
+            logger.info("\nModel Performance (on labeled validation set):")
+            for model_name, result_dict in self.results.items():
+                logger.info(f"\n{model_name.replace('_', ' ').title()}:")
+                
+                if result_dict is None or 'metrics' not in result_dict:
+                    logger.warning("  No metrics available (unsupervised execution).")
+                    continue
+                
+                metrics = result_dict['metrics']
+                logger.info(f"  Precision: {metrics.get('precision', 0):.4f}")
+                logger.info(f"  Recall:    {metrics.get('recall', 0):.4f}")
+                logger.info(f"  F1-Score:  {metrics.get('f1_score', 0):.4f}")
+        else:
+            logger.info("\nNo model training results to display.")
         
         # Output files
-        logger.info("\nGenerated Output Files:")
+        logger.info("\nGenerated Output Locations:")
         logger.info(f"  - Processed Data: {config.PROCESSED_DATA_DIR}")
         logger.info(f"  - Trained Models: {config.MODELS_DIR}")
-        logger.info(f"  - Results & Metrics: {config.RESULTS_DIR}")
-        logger.info(f"  - Visualizations: {config.RESULT_PATHS['visualizations']}")
-        logger.info(f"  - Alerts: {config.RESULT_PATHS['alerts']}")
-        logger.info(f"  - Logs: {config.LOGGING['file']}")
-        
-        logger.info("\n" + "="*80 + "\n")
-
+        logger.info(f"  - Alert Logs:     {config.RESULT_PATHS.get('alerts', 'See results dir')}")
+        logger.info(f"  - Logs:           {config.LOGGING.get('file', 'logs/')}")
 
 def main():
-    """Main entry point with command-line argument support"""
+    """Main entry point"""
     parser = argparse.ArgumentParser(
         description='Insider Threat Detection System - Main Pipeline',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run full pipeline
-  python main.py --full
-  
-  # Run only specific stages
-  python main.py --stages 1 2 3
-  
-  # Skip certain stages (e.g., if data already preprocessed)
-  python main.py --full --skip 1 2
-  
-  # Run individual stages
-  python main.py --preprocess
-  python main.py --train
-  python main.py --evaluate
-        """
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     # Pipeline options
     parser.add_argument('--full', action='store_true', help='Run complete pipeline')
-    parser.add_argument('--stages', nargs='+', type=int, choices=range(1, 7),
-                       help='Run specific stages (1-6)')
-    parser.add_argument('--skip', nargs='+', type=int, choices=range(1, 7),
-                       help='Skip specific stages')
+    parser.add_argument('--stages', nargs='+', type=int, choices=range(1, 7), help='Run specific stages')
+    parser.add_argument('--skip', nargs='+', type=int, choices=range(1, 7), help='Skip specific stages')
     
-    # Individual stage options
-    parser.add_argument('--preprocess', action='store_true', help='Run only preprocessing')
-    parser.add_argument('--feature-eng', action='store_true', help='Run only feature engineering')
-    parser.add_argument('--train', action='store_true', help='Run only model training')
-    parser.add_argument('--evaluate', action='store_true', help='Run only evaluation')
-    parser.add_argument('--ensemble', action='store_true', help='Run only ensemble')
-    parser.add_argument('--visualize', action='store_true', help='Run only visualization')
+    # Quick flags
+    parser.add_argument('--preprocess', action='store_true', help='Run Stage 1')
+    parser.add_argument('--feature-eng', action='store_true', help='Run Stage 2')
+    parser.add_argument('--train', action='store_true', help='Run Stage 3')
+    parser.add_argument('--evaluate', action='store_true', help='Run Stage 4')
     
-    # Other options
-    parser.add_argument('--insider-list', type=str, help='Path to file with insider user IDs')
+    # Data options
+    parser.add_argument('--insider-list', type=str, help='Path to file with insider user IDs (for ground truth)')
     
     args = parser.parse_args()
     
-    # Initialize pipeline
+    # Initialize
     pipeline = InsiderThreatDetectionPipeline()
     
     # Load insider list if provided
     insider_list = None
-    if args.insider_list:
+    if args.insider_list and os.path.exists(args.insider_list):
         try:
             with open(args.insider_list, 'r') as f:
                 insider_list = [line.strip() for line in f if line.strip()]
-            logger.info(f"Loaded {len(insider_list)} insider user IDs")
+            logger.info(f"Loaded {len(insider_list)} insider user IDs for evaluation labeling.")
         except Exception as e:
             logger.error(f"Could not load insider list: {e}")
     
-    # Run based on arguments
-    if args.full:
-        pipeline.run_full_pipeline(insider_list=insider_list, skip_stages=args.skip)
-    
-    elif args.stages:
+    # Execution Logic
+    if args.stages:
         skip_stages = [i for i in range(1, 7) if i not in args.stages]
         pipeline.run_full_pipeline(insider_list=insider_list, skip_stages=skip_stages)
-    
     elif args.preprocess:
         pipeline.stage_1_data_preprocessing(insider_list)
-    
     elif args.feature_eng:
         pipeline.stage_2_feature_engineering()
-    
     elif args.train:
         pipeline.stage_3_model_training()
-    
     elif args.evaluate:
         pipeline.stage_4_model_evaluation()
-    
-    elif args.ensemble:
-        pipeline.stage_5_ensemble_integration()
-    
-    elif args.visualize:
-        pipeline.stage_6_visualization()
-    
-    else:
-        # No arguments provided, run full pipeline
-        logger.info("No arguments provided. Running full pipeline...")
+    elif args.full:
         pipeline.run_full_pipeline(insider_list=insider_list)
-
+    else:
+        # Default behavior if no args provided
+        logger.info("No specific arguments provided. Running full pipeline...")
+        pipeline.run_full_pipeline(insider_list=insider_list)
 
 if __name__ == "__main__":
     main()
